@@ -1,0 +1,112 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from ultralytics import YOLO
+import os
+import shutil
+
+app = FastAPI()
+
+# Allow React frontend to connect
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+
+SD_CARD_PATH = "E:/"   # 🔥 CHANGE if your SD card is different
+IMAGE_FOLDER = "inspections/session_01"
+
+# Ensure inspection folder exists
+os.makedirs(IMAGE_FOLDER, exist_ok=True)
+
+# Load YOLO model safely
+try:
+    model = YOLO("best.pt")
+    print("✅ YOLO model loaded successfully.")
+except Exception as e:
+    print("❌ Error loading YOLO model:", e)
+    model = None
+
+# Serve images to frontend
+app.mount("/images", StaticFiles(directory="inspections"), name="images")
+
+
+# -------------------------------
+# RUN BATCH ENDPOINT
+# -------------------------------
+
+@app.get("/run-batch/")
+def run_batch():
+
+    if model is None:
+        return {"error": "Model not loaded properly."}
+
+    # ---------------------------
+    # STEP 1: Copy images from SD
+    # ---------------------------
+
+    if os.path.exists(SD_CARD_PATH):
+        for file in os.listdir(SD_CARD_PATH):
+            if file.lower().endswith((".jpg", ".jpeg", ".png")):
+
+                src = os.path.join(SD_CARD_PATH, file)
+                dst = os.path.join(IMAGE_FOLDER, file)
+
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+    else:
+        print("⚠ SD card not detected.")
+
+    # ---------------------------
+    # STEP 2: Check if images exist
+    # ---------------------------
+
+    image_files = [
+        f for f in os.listdir(IMAGE_FOLDER)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ]
+
+    if len(image_files) == 0:
+        return {
+            "total_defect_images": 0,
+            "images": [],
+            "message": "No images found to process."
+        }
+
+    # ---------------------------
+    # STEP 3: Run YOLO
+    # ---------------------------
+
+    results = model.predict(source=IMAGE_FOLDER, conf=0.5)
+
+    response = []
+
+    for r in results:
+
+        if r.boxes is not None and len(r.boxes) > 0:
+
+            detections = []
+
+            for box in r.boxes:
+                detections.append({
+                    "class_id": int(box.cls),
+                    "confidence": float(box.conf),
+                    "bbox": box.xyxy.tolist()[0]
+                })
+
+            response.append({
+                "filename": f"/images/session_01/{os.path.basename(r.path)}",
+                "detections": detections
+            })
+
+    return {
+        "total_defect_images": len(response),
+        "images": response
+    }
